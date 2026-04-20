@@ -217,25 +217,10 @@ if __name__ == '__main__':
 result = server.eval(cur_round=args.rounds, eval_avg_acc=eval_avg_acc)
 print("FINAL:", result)
 
-# ===== SAFE IMPORT =====
-import os
 import json
+import os
 
-# ===== EXTRACT ROUGE =====
-final_eval_rouge = None
-
-if isinstance(result, dict):
-    if "rouge" in result:
-        final_eval_rouge = result["rouge"]
-    elif "final_eval_rouge" in result:
-        final_eval_rouge = result["final_eval_rouge"]
-    else:
-        final_eval_rouge = result
-else:
-    final_eval_rouge = result
-
-
-# ===== 1) SAVE ACCURACY JSON =====
+# ===== ACC JSON =====
 acc_output = {
     "eval_avg_acc": eval_avg_acc
 }
@@ -244,18 +229,15 @@ with open(os.path.join(log_dir, "eval_avg_acc.json"), "w") as f:
     json.dump(acc_output, f, indent=2)
 
 
-# ===== 2) SAVE ROUGE JSON =====
-rouge_output = {
-    "final_eval_rouge": final_eval_rouge
+# ===== METRIC JSON (ROUGE / ACC / LOSS) =====
+metric_output = {
+    "final_metric": result,
+    "metric_type": metric_type
 }
 
-with open(os.path.join(log_dir, "eval_rouge.json"), "w") as f:
-    json.dump(rouge_output, f, indent=2)
+with open(os.path.join(log_dir, "eval_metric.json"), "w") as f:
+    json.dump(metric_output, f, indent=2)
 
 
-# ===== LOG =====
 print("[LOG] saved eval_avg_acc.json")
-print("[LOG] saved eval_rouge.json")
-
-print(json.dumps(acc_output, indent=2))
-print(json.dumps(rouge_output, indent=2))
+print("[LOG] saved eval_metric.json")
