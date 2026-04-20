@@ -36,7 +36,12 @@ class Client(object):
         model.to(self.device)
 
         loader = self.original_train_loader if self.args.filtering_model == 'same' else self.train_loader_for_filtering
+        model = self.model if self.args.filtering_model == 'same' else self.filtering_model
 
+        model.config.output_hidden_states = True
+        model.config.return_dict = True
+
+        model.to(self.device)
         flatten_hidden_state_list = get_flatten_features(model, loader, args=self.args)
 
         # ✅ FIX: fallback if too few samples
