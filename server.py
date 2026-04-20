@@ -122,8 +122,8 @@ class Server(object):
 
     # ===== SAVE CHECKPOINTS =====
         if self.args.save and cur_round > 0:
-        save_dir = self.log_dir
-        os.makedirs(save_dir, exist_ok=True)
+            save_dir = self.log_dir
+            os.makedirs(save_dir, exist_ok=True)
 
         if len(eval_avg_acc) > 1:
             is_best = (
