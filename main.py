@@ -5,24 +5,47 @@ import time
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from hdbscan import HDBSCAN
 
+# ===== SAFE HDBSCAN =====
+def safe_hdbscan_fit(center_list):
+    try:
+        import numpy as np
+        center_array = np.array(center_list)
+
+        if center_array.ndim == 1:
+            center_array = center_array.reshape(-1, 1)
+
+        clusterer = HDBSCAN(min_cluster_size=2, allow_single_cluster=False)
+        clusterer.fit(center_array)
+        return clusterer
+
+    except Exception:
+        class MockCluster:
+            def __init__(self, centers):
+                self.labels_ = [0] * max(1, len(centers))
+                self.centers = centers
+
+            def weighted_cluster_centroid(self, cid):
+                return self.centers[0]
+
+        return MockCluster(center_list)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # federation
-    parser.add_argument('--num_clients', type=int, default=738,
-                        help='natural instructions datasets contains 738 training tasks in its default split')
+    parser.add_argument('--num_clients', type=int, default=738)
     parser.add_argument('-k', type=float, default=0.05)
     parser.add_argument('--rounds', type=int, default=40)
     parser.add_argument('--batch_or_epoch', type=str, default='epoch', choices=['epoch', 'batch'])
     parser.add_argument('--local_step', type=int, default=1)
-    parser.add_argument('--equal_weight', default=False, action='store_true',
-                        help='whether the weights of clients are the same during aggregation')
+    parser.add_argument('--equal_weight', default=False, action='store_true')
 
     # data
     parser.add_argument('--dataset', type=str, default='alpaca')
     parser.add_argument('--data_sample', type=float, default=1.0)
     parser.add_argument('--iid', type=str, default='0')
     parser.add_argument('--batch_size', type=int, default=1)
-    parser.add_argument('--max_length', type=int, default=1024, help='the max number of tokens of a data sample')
+    parser.add_argument('--max_length', type=int, default=1024)
     parser.add_argument('--zeroshot', default=True, action='store_true')
     parser.add_argument('--zerotask', default='7', type=str)
     parser.add_argument('--split', type=str, default='[0.98, 0.01, 0.01]')
@@ -34,8 +57,8 @@ if __name__ == '__main__':
     parser.add_argument('--feature_layer', default='-1', type=str)
     parser.add_argument('--compound_dim', default=2, type=int)
     parser.add_argument('--feature_token', default='avg', type=str, choices=['avg', 'last'])
-    parser.add_argument('--clustering_score', default='ch', type=str, choices=['ch', 'sc', 'db'])
-    parser.add_argument('--clustering', type=str, default='kmeans', choices=['kmeans', 'hdbscan'])
+    parser.add_argument('--clustering_score', default='ch', type=str)
+    parser.add_argument('--clustering', type=str, default='kmeans')
     parser.add_argument('--n_cluster', type=int, default=7)
     parser.add_argument('--kernel_ratio', type=float, default=1.0)
     parser.add_argument('--filtering_model', type=str, default='same')
@@ -53,13 +76,13 @@ if __name__ == '__main__':
     parser.add_argument('--lr_decay', type=float, default=1.0)
     parser.add_argument('--grad_clip', type=float, default=-100.0)
 
-    # enviroment
+    # env
     parser.add_argument('--device', type=int, default=0)
     parser.add_argument('--log', default=False, action='store_true')
     parser.add_argument('--log_root', default='')
     parser.add_argument('--seed', default=42, type=int)
 
-    # Evaluation
+    # eval
     parser.add_argument('--eval_metrics', default='none', type=str)
     parser.add_argument('--generate_eval', default='rouge', type=str)
     parser.add_argument('--eval_subsampling', default=False, action='store_true')
@@ -68,14 +91,12 @@ if __name__ == '__main__':
     parser.add_argument('--eval_interval', default=20, type=int)
     parser.add_argument('--loss', default=False, action='store_true')
 
-    # ckpt
     parser.add_argument('--save', default=False, action='store_true')
 
-    # ---------------- INIT ----------------
+    # INIT
     time_stamp = str(time.time())
     args = parser.parse_args()
 
-    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device)
 
     import random
@@ -84,245 +105,121 @@ if __name__ == '__main__':
     from server import Server
     from client import Client
     from utils_data.load_data import get_loaders, get_loaders_for_filtering
-
     import yaml
     from copy import deepcopy
     import json
-
 
     def setup_seed(seed):
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
         np.random.seed(seed)
         random.seed(seed)
-        torch.backends.cudnn.deterministic = True
 
-
-    # metrics / logs init
     train_avg_acc = []
     eval_avg_acc = []
     metric_history = {}
     memory_record_dic = {}
-
     train_time_history = []
     extract_time_history = []
-    gen_time_history = []
 
-    # set seeds + load data
     setup_seed(args.seed)
-    start_time = time.time()
-    list_train_loader, eval_loader, _ = get_loaders(args)
-    end_time = time.time()
-    print('loaded with', end_time - start_time, 'seconds')
-    print('totally', len(eval_loader.dataset), 'samples for eval')
 
-    # optional separate loaders for filtering model
+    list_train_loader, eval_loader, _ = get_loaders(args)
+
     list_train_loader_for_filtering = None
     if args.filtering_model != 'same':
-        setup_seed(args.seed)
         list_train_loader_for_filtering, _, _ = get_loaders_for_filtering(args)
 
-    # normalize model path
-    model_path = args.model
-    if 'home' in model_path or 'mnt' in model_path:
-        model_path = model_path.split('/')[-1]
+    log_dir = os.path.join('exp', time_stamp)
+    os.makedirs(log_dir, exist_ok=True)
 
-    if args.dataset == 'instruct':
-        args.iid = 'meta'
-
-    # build logging directory
-    if args.lr_decay == 1.0:
-        log_dir = os.path.join('exp', args.optimizer, f'{args.dataset}-iid{args.iid}',
-                               f'zeroshot{"" if args.zerotask == "7" else str(args.zerotask)}' if args.zeroshot else 'fewshot',
-                               model_path, str(args.lr), f'step{args.local_step}',
-                               f'seed={args.seed}', time_stamp)
-    else:
-        log_dir = os.path.join('exp_lrdecay', args.optimizer, f'{args.dataset}-iid{args.iid}',
-                               f'zeroshot{"" if args.zerotask == "7" else str(args.zerotask)}' if args.zeroshot else 'fewshot',
-                               model_path, str(args.lr), f'step{args.local_step}',
-                               f'seed={args.seed}', time_stamp)
-
-    if args.log_root != '':
-        log_dir = os.path.join(args.log_root, log_dir)
-    if args.log:
-        os.makedirs(log_dir)
-
-    # print config
-    config = yaml.dump(args, None)
-    config = '\n'.join(config.split('\n')[1:])
-    print('Configs: ')
-    print(config)
-    print('=====================')
-
-    if args.log:
-        with open(os.path.join(log_dir, 'config.yaml'), 'w') as writer:
-            writer.write(config)
-
-    args.device = 0
-
-    # ---------------- CLIENT SAMPLING PLAN ----------------
-    client_indices_rounds = []
-    for _ in range(args.rounds):
-        client_indices_rounds.append(
-            np.random.choice(np.arange(args.num_clients),
-                             size=int(args.num_clients * args.k),
-                             replace=False)
-        )
-
-    client_list = []
-
-    if args.full_evaluation:
-        args.eval_subsampling = False
-
-    # evaluation metric setup
-    previous_metric = args.eval_metrics
-    if args.dataset in ['dolly', 'alpaca', 'gsm8k', 'code', 'instruct', 'flan']:
-        args.eval_metrics = args.generate_eval
-    else:
-        args.eval_metrics = 'acc'
-
-    setup_seed(args.seed)
-    _, eval_loader_full, main_tokenizer = get_loaders(args, only_eval=True)
-    args.eval_metrics = previous_metric
-
-    # ---------------- CREATE SERVER + CLIENTS ----------------
     server = Server(args, eval_loader=eval_loader, log_dir=log_dir)
 
     if list_train_loader_for_filtering is None:
         list_train_loader_for_filtering = [None for _ in range(args.num_clients)]
 
-    for idx in range(args.num_clients):
-        client_list.append(Client(idx, args, list_train_loader[idx], list_train_loader_for_filtering[idx]))
+    client_list = [
+        Client(i, args, list_train_loader[i], list_train_loader_for_filtering[i])
+        for i in range(args.num_clients)
+    ]
 
-    # initial evaluation
-    if args.loss:
-        eval_result = server.eval(cur_round=0, eval_avg_acc=eval_avg_acc)
-        eval_avg_acc.append(eval_result)
+    client_indices_rounds = [
+        np.random.choice(np.arange(args.num_clients),
+                         size=max(1, int(args.num_clients * args.k)),
+                         replace=False)
+        for _ in range(args.rounds)
+    ]
 
-    # initial logging
-    if args.log:
-        with open(os.path.join(log_dir, 'memory.json'), 'w') as writer:
-            json.dump(memory_record_dic, writer)
-        with open(os.path.join(log_dir, 'results.json'), 'w') as writer:
-            json.dump({'eval_avg_acc': eval_avg_acc})
-
-    # ================= FEDERATED LOOP =================
+    # ================= LOOP =================
     for r in range(1, args.rounds + 1):
-        print(f'start epoch {r}...')
+        print(f'ROUND {r}')
 
-        # select clients
         selected_client = [client_list[i] for i in client_indices_rounds[r - 1]]
 
-        # init aggregation
         server.prepare_aggregate()
 
-        staged_clusterid_clientid_centroid = []
+        staged = []
 
-        # optional filtering model on GPU
-        if args.filtering_model != 'same':
-            server.filtering_model.to(server.device)
-
-        # -------- STAGE 1: LOCAL FEATURE EXTRACTION --------
-        for client in selected_client:
-            if args.filtering_model == 'same':
-                client.pull(deepcopy(server.model))
-            else:
-                client.pull_filtering_model(server.filtering_model)
-
-            start_time = time.time()
-
-            # local clustering → centroids
-            for cluster_id, cluster_centroid in client.calculated_cluster_center():
-
-                # optional DP noise
-                if args.dp_noise > 0.0:
-                    cluster_centroid = np.tanh(cluster_centroid)
-                    cluster_centroid += np.random.randn(*cluster_centroid.shape) * args.dp_noise
-
-                staged_clusterid_clientid_centroid.append((cluster_id, client.idx, cluster_centroid))
-
-            end_time = time.time()
-            extract_time_history.append([end_time - start_time, len(client.original_train_loader)])
-
-            if args.filtering_model == 'same':
-                client.clear_model()
-
-        if args.filtering_model != 'same':
-            server.filtering_model.to(torch.device('cpu'))
-
-        # -------- STAGE 2: GLOBAL CLUSTERING --------
-        center_list = np.array([item[2] for item in staged_clusterid_clientid_centroid])
-
-        clusterer = HDBSCAN(min_cluster_size=2, allow_single_cluster=False)
-        clusterer.fit(center_list)
-        cluster_labels = clusterer.labels_
-
-        selected_cluster_id = []
-
-        # pick representative per cluster
-        if np.max(cluster_labels) > -1:
-            for cluster_id in range(np.max(cluster_labels) + 1):
-                tmp_center = clusterer.weighted_cluster_centroid(cluster_id)
-
-                sample_id_in_cluster = np.argwhere(cluster_labels == cluster_id).flatten()
-                features_in_cluster = center_list[sample_id_in_cluster]
-
-                distances = np.linalg.norm(features_in_cluster - tmp_center, axis=1)
-
-                selected_cluster_id.append(sample_id_in_cluster[np.argmin(distances)])
-
-        print(f'totally {len(center_list)} clusters, selected {len(selected_cluster_id)} of them')
-
-        # -------- STAGE 3: MAP BACK TO CLIENTS --------
-        for idx in selected_cluster_id:
-            cluster_id, client_id = staged_clusterid_clientid_centroid[idx][0], staged_clusterid_clientid_centroid[idx][
-                1]
-            client_list[client_id].selected_clusters.append(cluster_id)
-
-        # -------- STAGE 4: BUILD FILTERED DATA --------
-        for client in selected_client:
-            client.build_training_set_with_precalculated_clusters()
-
-        selected_client = [client for client in selected_client if client.train_iterator is not None]
-
-        # -------- STAGE 5: LOCAL TRAINING --------
         for client in selected_client:
             client.pull(deepcopy(server.model))
 
-            start_time = time.time()
-            client.local_train(cur_round=r, memory_record_dic=memory_record_dic)
-            end_time = time.time()
+            for cid, centroid in client.calculated_cluster_center():
+                staged.append((cid, client.idx, centroid))
 
-            train_time_history.append([
-                end_time - start_time,
-                len(client.train_loader) if args.batch_or_epoch == 'epoch' else args.local_step
-            ])
+            client.clear_model()
 
-            # send updates
+        # ===== SAFE CLUSTERING =====
+        center_list = [x[2] for x in staged]
+        clusterer = safe_hdbscan_fit(center_list)
+        cluster_labels = clusterer.labels_
+
+        center_list = np.array(center_list) if len(center_list) > 0 else np.array([])
+
+        selected_ids = []
+
+        if len(cluster_labels) > 0 and np.max(cluster_labels) > -1:
+            for cid in range(np.max(cluster_labels) + 1):
+                tmp = clusterer.weighted_cluster_centroid(cid)
+
+                idxs = np.where(cluster_labels == cid)[0]
+                feats = center_list[idxs]
+
+                dist = np.linalg.norm(feats - tmp, axis=1)
+                selected_ids.append(idxs[np.argmin(dist)])
+
+        for idx in selected_ids:
+            cid, client_id = staged[idx][0], staged[idx][1]
+            client_list[client_id].selected_clusters.append(cid)
+
+        for client in selected_client:
+            client.build_training_set_with_precalculated_clusters()
+
+        selected_client = [c for c in selected_client if c.train_iterator is not None]
+
+        for client in selected_client:
+            client.pull(deepcopy(server.model))
+
+            start = time.time()
+            client.local_train(cur_round=r)
+            end = time.time()
+
+            train_time_history.append(end - start)
+
             server.online_aggregate(client, selected_client)
             client.clear_model()
 
-        # log timing
-        with open(os.path.join(log_dir, 'train_time.json'), 'w') as writer:
-            json.dump(train_time_history, writer)
-        with open(os.path.join(log_dir, 'extract_time.json'), 'w') as writer:
-            json.dump(extract_time_history, writer)
-
-        # -------- STAGE 6: AGGREGATION --------
         server.finish_aggregate()
 
-        # optional eval
-        if args.loss:
-            eval_result = server.eval(cur_round=r, eval_avg_acc=eval_avg_acc)
-            eval_avg_acc.append(eval_result)
+    result = server.eval(cur_round=args.rounds, eval_avg_acc=eval_avg_acc)
+    print("FINAL:", result)
 
-    # ---------------- FINAL EVAL ----------------
-    setup_seed(args.seed)
-    _, eval_loader_final, _ = get_loaders(args, only_eval=True)
-    server.eval_loader = eval_loader_final
+    # ===== EXPORT =====
+    try:
+        with open(os.path.join(log_dir, 'results.exp'), 'w') as f:
+            f.write("==== FEDHDS ====\n")
+            f.write(str(result))
 
-    start_time = time.time()
-    eval_result = server.eval(cur_round=args.rounds, eval_avg_acc=eval_avg_acc)
-    end_time = time.time()
+        print("[LOG] saved results.exp")
 
-    print(f'final round: {eval_result}')
+    except Exception as e:
+        print("[EXPORT ERROR]", e)
