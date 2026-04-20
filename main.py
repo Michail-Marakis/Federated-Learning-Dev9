@@ -210,12 +210,11 @@ if __name__ == '__main__':
 
         server.finish_aggregate()
 
-    result = server.eval(cur_round=args.rounds, eval_avg_acc=eval_avg_acc)
-    print("FINAL:", result)
+
 
 # ===== FINAL EVAL =====
-result = server.eval(cur_round=args.rounds, eval_avg_acc=eval_avg_acc)
-print("FINAL:", result)
+result, metric_type = server.eval(cur_round=r, eval_avg_acc=eval_avg_acc)
+print("FINAL:", result, metric_type)
 
 import json
 import os
