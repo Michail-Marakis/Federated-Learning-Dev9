@@ -1,6 +1,10 @@
 import argparse
 import os
 import time
+import sys
+
+# Ρύθμιση για να βρίσκει η Python τα modules στον φάκελο του project
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from hdbscan import HDBSCAN
@@ -104,7 +108,10 @@ if __name__ == '__main__':
     import torch
     from server import Server
     from client import Client
+    
+    # ΕΔΩ ΓΙΝΕΤΑΙ ΤΟ IMPORT ΑΠΟ ΤΟ UTILS_DATA
     from utils_data.load_data import get_loaders, get_loaders_for_filtering
+    
     import yaml
     from copy import deepcopy
     import json
@@ -124,6 +131,7 @@ if __name__ == '__main__':
 
     setup_seed(args.seed)
 
+    # Κλήση της get_loaders από το load_data.py
     list_train_loader, eval_loader, _ = get_loaders(args)
 
     list_train_loader_for_filtering = None
@@ -210,33 +218,24 @@ if __name__ == '__main__':
 
         server.finish_aggregate()
 
+    # ===== FINAL EVAL =====
+    result, metric_type = server.eval(cur_round=r, eval_avg_acc=eval_avg_acc)
+    print("FINAL:", result, metric_type)
 
+    # ===== ACC JSON =====
+    acc_output = {
+        "eval_avg_acc": eval_avg_acc
+    }
+    with open(os.path.join(log_dir, "eval_avg_acc.json"), "w") as f:
+        json.dump(acc_output, f, indent=2)
 
-# ===== FINAL EVAL =====
-result, metric_type = server.eval(cur_round=r, eval_avg_acc=eval_avg_acc)
-print("FINAL:", result, metric_type)
+    # ===== METRIC JSON =====
+    metric_output = {
+        "final_metric": result,
+        "metric_type": metric_type
+    }
+    with open(os.path.join(log_dir, "eval_metric.json"), "w") as f:
+        json.dump(metric_output, f, indent=2)
 
-import json
-import os
-
-# ===== ACC JSON =====
-acc_output = {
-    "eval_avg_acc": eval_avg_acc
-}
-
-with open(os.path.join(log_dir, "eval_avg_acc.json"), "w") as f:
-    json.dump(acc_output, f, indent=2)
-
-
-# ===== METRIC JSON (ROUGE / ACC / LOSS) =====
-metric_output = {
-    "final_metric": result,
-    "metric_type": metric_type
-}
-
-with open(os.path.join(log_dir, "eval_metric.json"), "w") as f:
-    json.dump(metric_output, f, indent=2)
-
-
-print("[LOG] saved eval_avg_acc.json")
-print("[LOG] saved eval_metric.json")
+    print("[LOG] saved eval_avg_acc.json")
+    print("[LOG] saved eval_metric.json")
